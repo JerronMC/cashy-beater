@@ -6,5 +6,5 @@
   worldwide share one live leaderboard (refreshes every 2 seconds). See README.md for the 3-minute setup.
 */
 window.CASHY_CONFIG = {
-  FIREBASE_URL: ""
+  FIREBASE_URL: "https://rofiles-8f18b-default-rtdb.firebaseio.com"
 };
