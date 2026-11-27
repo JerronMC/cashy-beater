@@ -1,0 +1,21 @@
+
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "players": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid"
+      }
+    },
+
+    "publicProfiles": {
+      ".read": "auth != null"
+    },
+
+    "globalChat": {
+      ".read": "auth != null"
+    }
+  }
+}
