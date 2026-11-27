@@ -1,5 +1,5 @@
-/* Cashy Beater — by Dadasaves
-   Static app for GitHub Pages. Local mode by default; online mode via Firebase Realtime Database (see README). */
+/* Cashy Beater 2.0.0 — update by DataRonn
+   Existing account and progress records are migrated additively; no automatic wipe is performed. */
 (function () {
   'use strict';
 
@@ -11,6 +11,9 @@
   var DAILY_TAP_GOAL = 100;
   var SYNC_MS = 2000;                // leaderboard refresh
   var MAX_BOARD = 50;
+  var HASH_ITERATIONS = 210000;
+  var MAX_BOOST_LEVEL = 10;
+  var MAX_LUCKY_LEVEL = 10;
 
   /* ----------------------------------------------------------------- helpers */
   var $ = function (s, r) { return (r || document).querySelector(s); };
@@ -46,23 +49,58 @@
     (window.crypto || window.msCrypto).getRandomValues(a);
     return Array.prototype.map.call(a, function (x) { return (x < 16 ? '0' : '') + x.toString(16); }).join('');
   }
-  function hashPw(pw, salt) {
+  function hashPw(pw, salt, iterations) {
     var enc = new TextEncoder();
-    if (window.crypto && crypto.subtle) {
-      return crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveBits']).then(function (k) {
-        return crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode(salt), iterations: 60000, hash: 'SHA-256' }, k, 256);
-      }).then(function (bits) {
-        return Array.prototype.map.call(new Uint8Array(bits), function (x) { return (x < 16 ? '0' : '') + x.toString(16); }).join('');
-      });
+    iterations = Math.max(60000, Number(iterations) || HASH_ITERATIONS);
+    if (!window.crypto || !crypto.subtle) {
+      return Promise.reject(new Error('Secure password support is unavailable. Open the game using its HTTPS website.'));
     }
-    var h = 5381, s = salt + pw;
-    for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    return crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveBits']).then(function (k) {
+      return crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode(salt), iterations: iterations, hash: 'SHA-256' }, k, 256);
+    }).then(function (bits) {
+      return Array.prototype.map.call(new Uint8Array(bits), function (x) { return (x < 16 ? '0' : '') + x.toString(16); }).join('');
+    });
+  }
+  function legacyHashPw(pw, salt) {
+    var h = 5381, v = salt + pw;
+    for (var i = 0; i < v.length; i++) h = ((h << 5) + h + v.charCodeAt(i)) | 0;
     return Promise.resolve('x' + (h >>> 0).toString(16));
   }
+  function currentSettings() {
+    var v = LS.get('cb_settings', {});
+    return { sfx: v.sfx !== false, vfx: v.vfx !== false };
+  }
+  var prefs = currentSettings();
+  function applyPrefs() { var z = document.querySelector('#tapzone'); if (z) z.classList.toggle('no-vfx', !prefs.vfx); }
+  var audioContext = null, lastSfxAt = 0;
+  function playSfx(kind) {
+    if (!prefs.sfx || !window.AudioContext && !window.webkitAudioContext) return;
+    var now = Date.now();
+    if (kind === 'tap' && now - lastSfxAt < 55) return;
+    lastSfxAt = now;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      audioContext = audioContext || new AC();
+      if (audioContext.state === 'suspended') audioContext.resume();
+      var osc = audioContext.createOscillator(), gain = audioContext.createGain();
+      var tones = { tap: 560, claim: 760, buy: 420, toggle: 620, alert: 230 };
+      osc.type = 'sine'; osc.frequency.value = tones[kind] || 500;
+      gain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.055, audioContext.currentTime + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + (kind === 'tap' ? 0.045 : 0.11));
+      osc.connect(gain); gain.connect(audioContext.destination);
+      osc.start(); osc.stop(audioContext.currentTime + (kind === 'tap' ? 0.05 : 0.12));
+    } catch (e) {}
+  }
+  function isJerron() { return !!me && me.key === 'jerron'; }
+  function canUseLocalOwnerTools() { return isJerron() && !ONLINE; }
+  function getLocalBans() { return LS.get('cb_bans', {}); }
+  function saveLocalBans(v) { LS.set('cb_bans', v); }
+
 
   /* ------------------------------------------------------------------- state */
   function newState() {
-    return { bal: 0, total: 0, taps: 0, tapLvl: 0, autoLvl: 0, streak: 0, lastDailyDay: '', lastBox: 0,
+    return { bal: 0, total: 0, taps: 0, tapLvl: 0, autoLvl: 0, boostLvl: 0, luckyLvl: 0, streak: 0, lastDailyDay: '', lastBox: 0,
       day: '', dayTaps: 0, dayClaimed: false, done: {}, wasKing: false, created: Date.now() };
   }
   var me = null, S = null;
@@ -78,34 +116,65 @@
 
   function register(name, pw) {
     var key = name.toLowerCase(), salt = rndHex(16), c = Date.now();
-    return hashPw(pw, salt).then(function (h) {
+    return hashPw(pw, salt, HASH_ITERATIONS).then(function (h) {
       var st = newState(); st.created = c;
       if (ONLINE) {
         return Net.get('users/' + key + '/h').then(function (ex) {
           if (ex) throw new Error('That username is taken.');
-          var o = {}; o['users/' + key] = { n: name, salt: salt, h: h, c: c, data: st }; o['board/' + key] = { n: name, s: 0, c: c, t: c };
+          var o = {}; o['users/' + key] = { n: name, salt: salt, h: h, it: HASH_ITERATIONS, c: c, data: st }; o['board/' + key] = { n: name, s: 0, c: c, t: c };
           return Net.patch(o);
         }).then(function () { return { me: { key: key, name: name, created: c }, state: st }; });
       }
       var u = lu();
       if (u[key]) throw new Error('That username is taken on this device.');
-      u[key] = { n: name, salt: salt, h: h, c: c, data: st }; LS.set('cb_users', u);
+      u[key] = { n: name, salt: salt, h: h, it: HASH_ITERATIONS, c: c, data: st }; LS.set('cb_users', u);
       return { me: { key: key, name: name, created: c }, state: st };
     });
   }
   function login(name, pw) {
     var key = name.toLowerCase();
+    var lock = LS.get('cb_login_' + key, { fails: 0, until: 0 });
+    if (lock.until > Date.now()) return Promise.reject(new Error('Too many attempts. Try again in ' + Math.ceil((lock.until - Date.now()) / 1000) + ' seconds.'));
     return Promise.resolve(ONLINE ? Net.get('users/' + key) : lu()[key]).then(function (rec) {
       if (!rec || !rec.h) throw new Error('No account with that name.');
-      return hashPw(pw, rec.salt).then(function (h) {
+      if (!ONLINE) {
+        var ban = getLocalBans()[key];
+        if (ban && (!ban.until || ban.until > Date.now())) {
+          throw new Error('This account is banned' + (ban.until ? ' until ' + new Date(ban.until).toLocaleString() : '') + (ban.reason ? '. Reason: ' + ban.reason : '.') );
+        }
+        if (ban && ban.until && ban.until <= Date.now()) { var bans = getLocalBans(); delete bans[key]; saveLocalBans(bans); }
+      }
+      var oldLegacy = String(rec.h).charAt(0) === 'x';
+      var verify = oldLegacy ? legacyHashPw(pw, rec.salt) : hashPw(pw, rec.salt, Number(rec.it) || 60000);
+      return verify.then(function (h) {
         if (h !== rec.h) throw new Error('Wrong password.');
+        LS.del('cb_login_' + key);
         var st = Object.assign(newState(), rec.data || {});
         var cached = LS.get('cb_state_' + key, null);
         if (cached && cached.total > st.total) st = Object.assign(newState(), cached);
-        return { me: { key: key, name: rec.n || name, created: rec.c || Date.now() }, state: st };
+        var m = { key: key, name: rec.n || name, created: rec.c || Date.now() };
+        // Upgrade old local password hashes after a successful login; account data is left intact.
+        if (!ONLINE && (oldLegacy || (Number(rec.it) || 60000) < HASH_ITERATIONS)) {
+          var freshSalt = rndHex(16);
+          return hashPw(pw, freshSalt, HASH_ITERATIONS).then(function (freshHash) {
+            var users = lu();
+            if (users[key]) { users[key].salt = freshSalt; users[key].h = freshHash; users[key].it = HASH_ITERATIONS; LS.set('cb_users', users); }
+            return { me: m, state: st };
+          });
+        }
+        return { me: m, state: st };
       });
+    }).catch(function (err) {
+      if (err && (err.message === 'Wrong password.' || err.message === 'No account with that name.')) {
+        var a = LS.get('cb_login_' + key, { fails: 0, until: 0 });
+        a.fails = (a.fails || 0) + 1;
+        if (a.fails >= 6) { a.fails = 0; a.until = Date.now() + 60000; }
+        LS.set('cb_login_' + key, a);
+      }
+      throw err;
     });
   }
+
   function saveLocal() {
     if (!me) return;
     LS.set('cb_state_' + me.key, S);
@@ -153,9 +222,16 @@
   }
 
   /* --------------------------------------------------------------------- game */
-  function perTap() { return 1 + S.tapLvl; }
+  function perTap() { return Math.max(1, Math.round((1 + S.tapLvl) * (1 + 0.25 * (S.boostLvl || 0)) * 100) / 100); }
+  function rateFmt(n) { return Number.isInteger(n) ? fmt(n) : Number(n).toFixed(2); }
   function perSec() { return S.autoLvl; }
-  function cost(k) { return k === 'tap' ? Math.round(40 * Math.pow(1.55, S.tapLvl)) : Math.round(120 * Math.pow(1.6, S.autoLvl)); }
+  function cost(k) {
+    if (k === 'tap') return Math.round(40 * Math.pow(1.55, S.tapLvl));
+    if (k === 'auto') return Math.round(120 * Math.pow(1.6, S.autoLvl));
+    if (k === 'boost') return Math.round(500 * Math.pow(1.85, S.boostLvl || 0));
+    if (k === 'lucky') return Math.round(300 * Math.pow(1.75, S.luckyLvl || 0));
+    return 0;
+  }
   function add(n) { S.bal += n; S.total += n; dirty = true; }
   function rollDay() { var d = dayStr(); if (S.day !== d) { S.day = d; S.dayTaps = 0; S.dayClaimed = false; dirty = true; } }
   function effStreak() { return (S.lastDailyDay === dayStr() || S.lastDailyDay === dayStr(-1)) ? S.streak : 0; }
@@ -164,7 +240,7 @@
     var zone = $('#tapzone'), r = zone.getBoundingClientRect(), fx = $('#fx');
     if (fx.children.length > 14) fx.removeChild(fx.firstChild);
     var s = document.createElement('span');
-    s.textContent = '+' + fmt(g);
+    s.textContent = '+' + rateFmt(g);
     s.style.left = (x - r.left + rint(-18, 18)) + 'px';
     s.style.top = (y - r.top - 10) + 'px';
     fx.appendChild(s);
@@ -173,12 +249,13 @@
   function tap(x, y) {
     if (!S) return;
     var now = performance.now();
-    if (now - lastTapAt < 70) return;          // max ~14 taps/sec
+    if (now - lastTapAt < 24) return;          // responsive tap guard; roughly 40 taps/sec
     lastTapAt = now;
     rollDay();
     var g = perTap(); S.taps++; S.dayTaps++; add(g);
-    spawn(x, y, g);
-    if (navigator.vibrate) navigator.vibrate(8);
+    if (prefs.vfx) spawn(x, y, g);
+    playSfx('tap');
+    if (navigator.vibrate && prefs.vfx) navigator.vibrate(8);
     hud();
   }
 
@@ -189,7 +266,7 @@
     { id: 'tap5k',   ic: 'zap',   title: 'Finger of steel', desc: 'Tap 5,000 times',             goal: 5000,  reward: 1500, val: function () { return S.taps; } },
     { id: 'earn1k',  ic: 'trend', title: 'Pocket money',    desc: 'Earn 1,000 Cashy in total',   goal: 1000,  reward: 200,  val: function () { return S.total; } },
     { id: 'earn25k', ic: 'trend', title: 'Big spender',     desc: 'Earn 25,000 Cashy in total',  goal: 25000, reward: 3000, val: function () { return S.total; } },
-    { id: 'upg1',    ic: 'up',    title: 'Level up',        desc: 'Buy your first upgrade',      goal: 1,     reward: 100,  val: function () { return S.tapLvl + S.autoLvl; } },
+    { id: 'upg1',    ic: 'up',    title: 'Level up',        desc: 'Buy your first upgrade',      goal: 1,     reward: 100,  val: function () { return S.tapLvl + S.autoLvl + (S.boostLvl || 0) + (S.luckyLvl || 0); } },
     { id: 'str7',    ic: 'flame', title: 'On fire',         desc: 'Reach a 7-day streak',        goal: 7,     reward: 1000, val: function () { return effStreak(); } },
     { id: 'top10',   ic: 'medal', title: 'Top 10',          desc: 'Reach the top 10 (needs 2+ players)', goal: 1, reward: 500, val: function () { return (rank > 0 && rank <= 10 && board.length >= 2) ? 1 : 0; } },
     { id: 'king',    ic: 'crown', title: 'Take the crown',  desc: 'Be #1 with 100+ Cashy (needs 2+ players)', goal: 1, reward: 2500, val: function () { return (rank === 1 && board.length >= 2 && S.total >= 100) ? 1 : 0; } }
@@ -225,6 +302,7 @@
     } else if (id === 'box') {
       if (now - S.lastBox < BOX_CD) return;
       var x = Math.random(); r = x < 0.6 ? rint(25, 75) : (x < 0.9 ? rint(80, 200) : rint(250, 500));
+      r = Math.floor(r * (1 + 0.15 * (S.luckyLvl || 0)));
       S.lastBox = now;
     } else if (id === 'dtap') {
       if (S.dayClaimed || S.dayTaps < DAILY_TAP_GOAL) return;
@@ -234,17 +312,25 @@
       if (!a || S.done[id] || a.val() < a.goal) return;
       S.done[id] = 1; r = a.reward;
     }
-    if (r) { add(r); toast('+' + fmt(r) + ' Cashy', 'gain'); }
+    if (r) { add(r); toast('+' + fmt(r) + ' Cashy', 'gain'); playSfx('claim'); }
     hud(); renderVisible(true);
   }
   function buy(k) {
-    if (!S) return;
+    if (!S || ['tap', 'auto', 'boost', 'lucky'].indexOf(k) < 0) return;
+    var level = k === 'tap' ? S.tapLvl : (k === 'auto' ? S.autoLvl : (k === 'boost' ? (S.boostLvl || 0) : (S.luckyLvl || 0)));
+    var max = k === 'boost' ? MAX_BOOST_LEVEL : (k === 'lucky' ? MAX_LUCKY_LEVEL : 500);
+    if (level >= max) { toast('This upgrade is already maxed.', 'warn'); return; }
     var c = cost(k);
-    if (S.bal < c) { toast('Not enough Cashy', 'warn'); return; }
-    S.bal -= c; if (k === 'tap') S.tapLvl++; else S.autoLvl++;
-    dirty = true; hud(); renderVisible(true);
-    toast(k === 'tap' ? 'Tap Power upgraded!' : 'Auto Earner upgraded!', 'gain');
+    if (S.bal < c) { toast('Not enough Cashy', 'warn'); playSfx('alert'); return; }
+    S.bal -= c;
+    if (k === 'tap') S.tapLvl++;
+    else if (k === 'auto') S.autoLvl++;
+    else if (k === 'boost') S.boostLvl = (S.boostLvl || 0) + 1;
+    else S.luckyLvl = (S.luckyLvl || 0) + 1;
+    dirty = true; hud(); renderVisible(true); playSfx('buy');
+    toast(k === 'tap' ? 'Tap Power upgraded!' : k === 'auto' ? 'Auto Earner upgraded!' : k === 'boost' ? 'Cashy Multiplier upgraded!' : 'Lucky Aura upgraded!', 'gain');
   }
+
 
   /* ---------------------------------------------------------------- rendering */
   function tierHtml() {
@@ -262,7 +348,7 @@
   function hud() {
     if (!S) return;
     $('#bal').textContent = fmt(S.bal);
-    $('#perTap').textContent = fmt(perTap());
+    $('#perTap').textContent = rateFmt(perTap());
     $('#perSec').textContent = fmt(perSec());
     setHtml('#tierChip', tierHtml());
     setHtml('#goal', goalHtml());
@@ -285,22 +371,27 @@
     setHtml('#tasksBox', '<h2>Daily things</h2>' + t.daily.map(taskRow).join('') + '<h2>Achievements</h2>' + t.ach.map(taskRow).join(''));
   }
   function renderShop() {
-    function card(k, ic, title, lvl, eff) {
-      var c = cost(k), can = S.bal >= c;
-      return '<div class="shopcard"><div class="ti">' + icon(ic) + '</div><div class="tb"><span class="lvl">LEVEL ' + lvl + '</span><b>' + title + '</b><span>' + eff + '</span></div>' +
-        '<button class="buy ' + (can ? 'can' : '') + '" data-buy="' + k + '">Upgrade<small><svg class="coinsvg"><use href="#i-coin"/></svg>' + fmt(c) + '</small></button></div>';
+    function card(k, ic, title, lvl, eff, max) {
+      var c = cost(k), can = S.bal >= c, capped = lvl >= max;
+      return '<div class="shopcard"><div class="ti">' + icon(ic) + '</div><div class="tb"><span class="lvl">LEVEL ' + lvl + (capped ? ' · MAX' : '') + '</span><b>' + title + '</b><span>' + eff + '</span></div>' +
+        '<button class="buy ' + (can && !capped ? 'can' : '') + '" data-buy="' + k + '"' + (capped ? ' disabled' : '') + '>' + (capped ? 'MAX' : 'Upgrade') + (capped ? '' : '<small><svg class="coinsvg"><use href="#i-coin"/></svg>' + fmt(c) + '</small>') + '</button></div>';
     }
     setHtml('#shopBox', '<h2>Upgrades</h2>' +
-      card('tap', 'hand', 'Tap Power', S.tapLvl, '+1 Cashy per tap · now ' + fmt(perTap()) + '/tap') +
-      card('auto', 'zap', 'Auto Earner', S.autoLvl, '+1 Cashy every second · now ' + fmt(perSec()) + '/sec') +
-      '<div class="empty">Your rank counts everything you’ve <b>earned</b>, so spending on upgrades never drops you down the leaderboard.</div>');
+      card('tap', 'hand', 'Tap Power', S.tapLvl, '+1 Cashy per tap · now ' + rateFmt(perTap()) + '/tap', 500) +
+      card('auto', 'zap', 'Auto Earner', S.autoLvl, '+1 Cashy every second · now ' + fmt(perSec()) + '/sec', 500) +
+      card('boost', 'trend', 'Cashy Multiplier', S.boostLvl || 0, 'Adds 25% tap power per level · now ' + (1 + 0.25 * (S.boostLvl || 0)).toFixed(2) + '×', MAX_BOOST_LEVEL) +
+      card('lucky', 'gift', 'Lucky Aura', S.luckyLvl || 0, 'Boosts Lucky Box rewards by 15% per level', MAX_LUCKY_LEVEL) +
+      '<div class="empty">Your leaderboard rank counts everything you have earned. Spending on upgrades does not lower your rank.</div>');
   }
+
   function row(e, i, isMe) {
     var r = i + 1, king = r === 1;
     var rk = r === 1 ? icon('crown') : (r <= 3 ? icon('medal') : r);
+    var owner = e.k === 'jerron';
+    var rankTitle = owner ? '<span class="owner-title">Jerron · Owner</span>' : '<span class="tr ' + (king ? 'king' : 'nine') + '">' + (king ? 'King Tier' : 'NineTNine Tier #' + r) + '</span>';
     return '<div class="row ' + (isMe ? 'me ' : '') + (r <= 3 ? 'r' + r : '') + '"><div class="rk">' + rk + '</div>' +
       '<div class="av" style="--h:' + hue(e.n) + '">' + esc(e.n.charAt(0).toUpperCase()) + '</div>' +
-      '<div class="nm"><b>' + esc(e.n) + (isMe ? ' (you)' : '') + '</b><span class="tr ' + (king ? 'king' : 'nine') + '">' + (king ? 'King Tier' : 'NineTNine Tier #' + r) + '</span></div>' +
+      '<div class="nm"><b>' + esc(e.n) + (isMe ? ' (you)' : '') + '</b>' + rankTitle + '</div>' +
       '<div class="sc">' + fmt(e.s) + '</div></div>';
   }
   function renderBoard() {
@@ -313,20 +404,123 @@
   }
   function renderMe() {
     function st(l, v) { return '<div class="stat"><small>' + l + '</small><b>' + v + '</b></div>'; }
+    var owner = isJerron(), localAdmin = canUseLocalOwnerTools();
+    var title = owner ? '<span class="owner-title">✦ Jerron · Owner</span>' : tierHtml();
+    var ownerPanel = '';
+    if (owner) {
+      ownerPanel = '<section class="panel owner-panel"><div class="panel-head"><h2>Owner Features Panel</h2><span class="owner-pill">OWNER</span></div>' +
+        (localAdmin ? '<p class="help good">Local owner tools are enabled on this device. These actions only affect accounts stored in this browser.</p>' : '<p class="help warn">Online admin actions are locked. The current Firebase setup has no authenticated owner role, so enabling these controls would let other players abuse them. Add server-side authorization before using online moderation.</p>') +
+        '<form id="adminBanForm" class="settings-form"><b>Ban player</b><label>Username / display name<input name="target" maxlength="32" placeholder="Player username" required ' + (localAdmin ? '' : 'disabled') + '></label><div class="form-grid"><label>Duration<input name="duration" type="number" min="1" max="3650" value="1" required ' + (localAdmin ? '' : 'disabled') + '></label><label>Unit<select name="unit" ' + (localAdmin ? '' : 'disabled') + '><option value="days">Days</option><option value="months">Months</option><option value="years">Years</option></select></label></div><label>Reason<input name="reason" maxlength="160" placeholder="Reason for ban" required ' + (localAdmin ? '' : 'disabled') + '></label><button class="btn danger" type="submit" ' + (localAdmin ? '' : 'disabled') + '>Ban player</button></form>' +
+        '<form id="adminUnbanForm" class="settings-form"><b>Unban player</b><label>Username<input name="target" maxlength="32" placeholder="Player username" required ' + (localAdmin ? '' : 'disabled') + '></label><button class="btn ghost" type="submit" ' + (localAdmin ? '' : 'disabled') + '>Unban</button></form>' +
+        '<form id="adminCashForm" class="settings-form"><b>Change Cashy</b><label>Username<input name="target" maxlength="32" placeholder="Player username" required ' + (localAdmin ? '' : 'disabled') + '></label><label>New balance<input name="amount" type="number" min="0" max="1000000000000000" step="1" placeholder="Amount" required ' + (localAdmin ? '' : 'disabled') + '></label><button class="btn primary" type="submit" ' + (localAdmin ? '' : 'disabled') + '>Set Cashy balance</button><p class="help">Changes current balance only. Total earned and leaderboard rank are preserved.</p></form>' +
+        '<div class="settings-form"><b>Economy Reset</b><p class="help">Resets balances, progress, taps, streaks and upgrades for all local accounts. Usernames and passwords are kept. A backup is created first.</p><button class="btn danger" data-act="economy-reset" ' + (localAdmin ? '' : 'disabled') + '>Reset local economy</button></div></section>';
+    }
     setHtml('#meBox',
-      '<div class="me-head"><div class="av" style="--h:' + hue(me.name) + '">' + esc(me.name.charAt(0).toUpperCase()) + '</div><h3>' + esc(me.name) + '</h3>' + tierHtml() + '</div>' +
+      '<div class="me-head"><div class="av" style="--h:' + hue(me.name) + '">' + esc(me.name.charAt(0).toUpperCase()) + '</div><h3>' + esc(me.name) + '</h3>' + title + '</div>' +
       '<div class="stats">' + st('Rank', rank ? '#' + rank : '—') + st('Total earned', fmt(S.total)) + st('Balance', fmt(S.bal)) + st('Taps', fmt(S.taps)) +
-      st('Streak', effStreak() + ' days') + st('Per tap / sec', fmt(perTap()) + ' / ' + fmt(perSec())) + '</div>' +
-      '<div class="btnrow"><button class="btn ghost" data-act="share">' + icon('share') + 'Invite friends</button>' +
-      '<button class="btn danger" data-act="logout">' + icon('logout') + 'Log out</button></div>' +
-      '<div class="empty">Mode: <b>' + (ONLINE ? 'Online (shared leaderboard)' : 'Local (this device)') + '</b><br>Cashy Beater by <b class="gold">Dadasaves</b></div>');
+      st('Streak', effStreak() + ' days') + st('Per tap / sec', rateFmt(perTap()) + ' / ' + fmt(perSec())) + '</div>' +
+      '<section class="panel"><h2>Account Security</h2><p class="help">Change your password by verifying your current password. New passwords must be at least 8 characters.</p>' +
+      '<form id="securityForm" class="settings-form"><label>Current password<input name="currentPassword" type="password" autocomplete="current-password" maxlength="128" required ' + (ONLINE ? 'disabled' : '') + '></label><label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required ' + (ONLINE ? 'disabled' : '') + '></label><label>Confirm new password<input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required ' + (ONLINE ? 'disabled' : '') + '></label><button class="btn primary" type="submit" ' + (ONLINE ? 'disabled' : '') + '>Change password</button></form>' +
+      (ONLINE ? '<p class="help warn">Password changes and forgotten-password resets need Firebase Authentication or a trusted recovery service. The current online database stores username/password hashes and has no verified email recovery. No account credentials will be modified by this update.</p>' : '<p class="help">Forgot your password? This account has no verified recovery email. Keep your password safe; a forgotten local password cannot be securely recovered.</p>') +
+      '<button class="btn ghost" data-act="export-backup">Export account backup</button></section>' +
+      '<section class="panel"><h2>Preferences</h2><div class="setting-row"><div><b>Sound effects</b><small>Tap, claim and shop sounds</small></div><button class="toggle ' + (prefs.sfx ? 'on' : '') + '" data-act="toggle-sfx" aria-pressed="' + prefs.sfx + '">' + (prefs.sfx ? 'ON' : 'OFF') + '</button></div><div class="setting-row"><div><b>Visual effects</b><small>Floating Cashy and vibration</small></div><button class="toggle ' + (prefs.vfx ? 'on' : '') + '" data-act="toggle-vfx" aria-pressed="' + prefs.vfx + '">' + (prefs.vfx ? 'ON' : 'OFF') + '</button></div></section>' +
+      ownerPanel +
+      '<div class="btnrow"><button class="btn ghost" data-act="share">' + icon('share') + 'Invite friends</button><button class="btn danger" data-act="logout">' + icon('logout') + 'Log out</button></div>' +
+      '<div class="empty">Version 2.0.0 · Update by <b class="gold">DataRonn</b><br>Original project credit: Dadasaves</div>');
   }
+  function renderUpdates() {
+    setHtml('#updatesBox', '<div class="update-hero"><span class="version-pill">VERSION 2.0.0</span><h3>Cashy Beater Update</h3><p>By <b class="gold">DataRonn</b></p></div>' +
+      '<section class="panel"><h2>What’s new</h2><div class="change-item"><b>Account security</b><span>Stronger password hashing for new/local accounts, login attempt cooldown, password change and account backup export.</span></div><div class="change-item"><b>Jerron Owner Title</b><span>Owner badge and Owner Features Panel for the account named Jerron.</span></div><div class="change-item"><b>Owner tools</b><span>Local ban/unban, Cashy balance editing and backed-up economy reset. Online actions remain locked until server-side owner authorization is configured.</span></div><div class="change-item"><b>New shop upgrades</b><span>Cashy Multiplier and Lucky Aura added to Tap Power and Auto Earner.</span></div><div class="change-item"><b>Faster tapping</b><span>Reduced input throttle and improved mobile tap handling.</span></div><div class="change-item"><b>Sound and visual effects</b><span>Toggle sound effects, floating Cashy effects and vibration in Preferences.</span></div><div class="change-item"><b>UI improvements</b><span>Updated profile badges, settings, responsive panels and changelog.</span></div><div class="change-item"><b>Progress protection</b><span>Existing accounts and saved progress are migrated without being wiped. Economy Reset is a separate, owner-only action with an automatic local backup.</span></div></section>');
+  }
+  function findLocalUser(query) {
+    var users = lu(), q = String(query || '').trim().toLowerCase();
+    if (!q) return null;
+    if (users[q]) return q;
+    var found = Object.keys(users).filter(function (k) { return String(users[k].n || '').toLowerCase() === q; });
+    return found.length === 1 ? found[0] : null;
+  }
+  function adminBanSubmit(form) {
+    if (!canUseLocalOwnerTools()) return toast('Online moderation is locked until secure server authorization is configured.', 'warn');
+    var fd = new FormData(form), target = findLocalUser(fd.get('target'));
+    var amount = Math.floor(Number(fd.get('duration'))), unit = String(fd.get('unit')), reason = String(fd.get('reason') || '').trim();
+    if (!target) return toast('Player account was not found on this device.', 'warn');
+    if (target === me.key) return toast('You cannot ban your own owner account.', 'warn');
+    if (!Number.isFinite(amount) || amount < 1 || amount > 3650 || !reason) return toast('Enter a valid duration and reason.', 'warn');
+    var until = new Date();
+    if (unit === 'months') until.setMonth(until.getMonth() + amount);
+    else if (unit === 'years') until.setFullYear(until.getFullYear() + amount);
+    else until.setDate(until.getDate() + amount);
+    var bans = getLocalBans();
+    bans[target] = { until: until.getTime(), reason: reason.slice(0, 160), by: me.name, created: Date.now() };
+    saveLocalBans(bans); form.reset(); toast('Banned ' + target + ' until ' + until.toLocaleDateString() + '.', 'gain'); playSfx('alert');
+  }
+  function adminUnbanSubmit(form) {
+    if (!canUseLocalOwnerTools()) return toast('Online moderation is locked until secure server authorization is configured.', 'warn');
+    var target = findLocalUser(new FormData(form).get('target'));
+    if (!target) return toast('Player account was not found on this device.', 'warn');
+    var bans = getLocalBans();
+    if (!bans[target]) return toast('That player is not banned.', 'warn');
+    delete bans[target]; saveLocalBans(bans); form.reset(); toast('Unbanned ' + target + '.', 'gain'); playSfx('claim');
+  }
+  function adminCashSubmit(form) {
+    if (!canUseLocalOwnerTools()) return toast('Online cash editing is locked until secure server authorization is configured.', 'warn');
+    var fd = new FormData(form), target = findLocalUser(fd.get('target')), amount = Number(fd.get('amount'));
+    if (!target) return toast('Player account was not found on this device.', 'warn');
+    if (!Number.isFinite(amount) || amount < 0 || amount > 1000000000000000) return toast('Enter a valid Cashy balance.', 'warn');
+    var users = lu(), rec = users[target];
+    var data = Object.assign(newState(), rec.data || {}); data.bal = Math.floor(amount); rec.data = data; users[target] = rec;
+    LS.set('cb_users', users); LS.set('cb_state_' + target, data);
+    if (me && me.key === target) { S = Object.assign(newState(), data); dirty = false; hud(); }
+    form.reset(); renderMe(); toast('Updated ' + target + ' to ' + fmt(data.bal) + ' Cashy.', 'gain'); playSfx('buy');
+  }
+  function changePasswordSubmit(form) {
+    if (ONLINE) return toast('Online password changes need secure Firebase Authentication setup.', 'warn');
+    var fd = new FormData(form), current = String(fd.get('currentPassword') || ''), next = String(fd.get('newPassword') || ''), confirm = String(fd.get('confirmPassword') || '');
+    if (next.length < 8 || next.length > 128) return toast('New password must be 8–128 characters.', 'warn');
+    if (next !== confirm) return toast('The new passwords do not match.', 'warn');
+    var users = lu(), rec = users[me.key];
+    if (!rec || !rec.h) return toast('Account record was not found.', 'warn');
+    var legacy = String(rec.h).charAt(0) === 'x';
+    var check = legacy ? legacyHashPw(current, rec.salt) : hashPw(current, rec.salt, Number(rec.it) || 60000);
+    check.then(function (h) {
+      if (h !== rec.h) throw new Error('Current password is incorrect.');
+      var salt = rndHex(16);
+      return hashPw(next, salt, HASH_ITERATIONS).then(function (hash) {
+        rec.salt = salt; rec.h = hash; rec.it = HASH_ITERATIONS; users[me.key] = rec; LS.set('cb_users', users);
+        form.reset(); toast('Password changed. Your account progress was kept.', 'gain'); playSfx('claim');
+      });
+    }).catch(function (e) { toast(e.message || 'Could not change password.', 'warn'); });
+  }
+  function exportBackup() {
+    if (!me || !S) return;
+    var payload = { app: 'Cashy Beater', version: '2.0.0', exportedAt: new Date().toISOString(), username: me.name, state: S };
+    var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = url; a.download = 'cashy-beater-' + me.key + '-backup.json'; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000); toast('Account backup exported. Keep it somewhere safe.', 'gain');
+  }
+  function resetLocalEconomy() {
+    if (!canUseLocalOwnerTools()) return toast('Online economy reset is locked until secure server authorization is configured.', 'warn');
+    if (!window.confirm('Reset the economy for every account saved in this browser? Balances, taps, streaks, tasks and upgrades will reset. Usernames and passwords will stay. A backup will be created first.')) return;
+    var users = lu(), stamp = Date.now(), backup = { created: new Date(stamp).toISOString(), users: users, bans: getLocalBans() };
+    try { localStorage.setItem('cb_economy_backup_' + stamp, JSON.stringify(backup)); }
+    catch (backupError) { toast('Backup could not be saved. Economy reset cancelled.', 'warn'); return; }
+    Object.keys(users).forEach(function (key) {
+      var rec = users[key] || {}, st = newState(); st.created = rec.c || (rec.data && rec.data.created) || stamp;
+      rec.data = st; users[key] = rec; LS.set('cb_state_' + key, st);
+    });
+    LS.set('cb_users', users);
+    if (me && users[me.key]) S = Object.assign(newState(), users[me.key].data);
+    dirty = false; board = localBoard(); computeRank(); hud(); renderMe(); toast('Local economy reset. Accounts remain saved; backup created.', 'gain'); playSfx('alert');
+  }
+
   function renderVisible(force) {
     if (!me) return;
     if (force) lastHtml = Object.assign({}, lastHtml);
     if (tab === 'tasks') renderTasks();
     else if (tab === 'shop') renderShop();
     else if (tab === 'board') renderBoard();
+    else if (tab === 'updates') renderUpdates();
     else if (tab === 'me') renderMe();
   }
   function setTab(t) {
@@ -374,7 +568,7 @@
       busy = false;
       if (!me) return;
       computeRank(); hud();
-      if (tab === 'board' || tab === 'me') renderVisible();
+      if (tab === 'board') renderVisible();
     });
   }
   function tick() {
@@ -432,7 +626,9 @@
     var name = $('#fUser').value.trim(), pw = $('#fPass').value, err = $('#authErr'), btn = $('#authBtn');
     err.textContent = '';
     if (!/^[A-Za-z0-9_]{3,14}$/.test(name)) { err.textContent = 'Username: 3–14 letters, numbers or _.'; return; }
-    if (pw.length < 4) { err.textContent = 'Password must be at least 4 characters.'; return; }
+    if (authMode === 'register' && pw.length < 8) { err.textContent = 'New passwords must be at least 8 characters.'; return; }
+    if (authMode === 'login' && pw.length < 4) { err.textContent = 'Password must be at least 4 characters.'; return; }
+    if (pw.length > 128) { err.textContent = 'Password is too long (maximum 128 characters).'; return; }
     btn.disabled = true;
     var old = btn.textContent; btn.textContent = 'Please wait…';
     (authMode === 'login' ? login(name, pw) : register(name, pw)).then(function (r) {
@@ -459,7 +655,14 @@
     else if (t.hasAttribute('data-buy')) buy(t.getAttribute('data-buy'));
     else {
       var a = t.getAttribute('data-act');
-      if (a === 'fs') toggleFS(); else if (a === 'logout') logout(); else if (a === 'share') share();
+      if (a === 'fs') toggleFS();
+      else if (a === 'logout') logout();
+      else if (a === 'share') share();
+      else if (a === 'export-backup') exportBackup();
+      else if (a === 'forgot-password') { $('#authErr').textContent = 'Password reset is not configured because accounts have no verified recovery email. Your account and progress have not been changed.'; }
+      else if (a === 'toggle-sfx') { prefs.sfx = !prefs.sfx; LS.set('cb_settings', prefs); renderMe(); playSfx('toggle'); }
+      else if (a === 'toggle-vfx') { prefs.vfx = !prefs.vfx; LS.set('cb_settings', prefs); applyPrefs(); renderMe(); playSfx('toggle'); }
+      else if (a === 'economy-reset') resetLocalEconomy();
     }
   });
   document.addEventListener('fullscreenchange', fsIcon);
@@ -468,7 +671,17 @@
   window.addEventListener('pagehide', function () { saveLocal(); });
   document.addEventListener('visibilitychange', function () { if (!document.hidden && me) sync(); });
   $('#authForm').addEventListener('submit', submitAuth);
+  document.addEventListener('submit', function (e) {
+    var f = e.target;
+    if (!f || !f.id) return;
+    if (f.id === 'securityForm' || f.id === 'adminBanForm' || f.id === 'adminUnbanForm' || f.id === 'adminCashForm') e.preventDefault();
+    if (f.id === 'securityForm') changePasswordSubmit(f);
+    else if (f.id === 'adminBanForm') adminBanSubmit(f);
+    else if (f.id === 'adminUnbanForm') adminUnbanSubmit(f);
+    else if (f.id === 'adminCashForm') adminCashSubmit(f);
+  });
 
+  applyPrefs();
   var coin = $('#coinBtn');
   coin.addEventListener('pointerdown', function (e) { e.preventDefault(); coin.classList.add('press'); tap(e.clientX, e.clientY); });
   ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (n) { coin.addEventListener(n, function () { coin.classList.remove('press'); }); });
@@ -478,8 +691,8 @@
 
   /* -------------------------------------------------------------------- boot */
   $('#modeNote').textContent = ONLINE
-    ? 'Online mode: your account and score are saved to the shared leaderboard.'
-    : 'Local mode: accounts and the leaderboard live on this device only. Site owner: see README to enable the worldwide leaderboard.';
+    ? 'Online mode: account and score sync to the shared leaderboard. Secure recovery and admin controls need backend setup.'
+    : 'Local mode: accounts and progress are stored on this device. Use Account Backup to save a copy. Version 2.0.0 by DataRonn.';
   var ses = LS.get('cb_session', null);
   if (ses && ses.key) {
     var st0 = LS.get('cb_state_' + ses.key, null);

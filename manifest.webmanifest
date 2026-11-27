@@ -1,7 +1,7 @@
 {
   "name": "Cashy Beater",
   "short_name": "Cashy Beater",
-  "description": "Earn Cashy, climb the leaderboard, become King. By Dadasaves.",
+  "description": "Cashy Beater 2.0.0 — earn Cashy, upgrade, and climb the leaderboard. Update by DataRonn.",
   "start_url": "./",
   "scope": "./",
   "display": "fullscreen",

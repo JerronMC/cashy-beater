@@ -1,67 +1,43 @@
-# Cashy Beater — by Dadasaves
+# Cashy Beater 2.0.0 — update by DataRonn
 
-Mobile-friendly tap-to-earn game with accounts, daily tasks, upgrades and a live leaderboard (refreshes every 2 seconds).
-Reach **#1 → King Tier**. If someone passes you, you drop to **NineTNine Tier #N** (every rank number has its own tier).
+A mobile-friendly Cashy tapping game with accounts, daily rewards, upgrades, ranks, account settings and a changelog.
 
-## 1) Put it on GitHub Pages (2 minutes)
+## Deploy
 
-1. Create a new GitHub repo (e.g. `cashy-beater`).
-2. Upload **all files from this folder** to the repo root (including `.nojekyll`).
-3. Repo → **Settings → Pages** → Source: *Deploy from a branch* → Branch: `main`, folder `/ (root)` → Save.
-4. Your game goes live at `https://YOUR-USERNAME.github.io/cashy-beater/`.
+1. Create a GitHub repository.
+2. Upload all files in this ZIP directly to the repository root. This ZIP is intentionally flat and contains no folders.
+3. Open **Settings → Pages** and publish from the `main` branch, `/ (root)`.
+4. Open the HTTPS GitHub Pages URL. HTTPS is required for secure browser password hashing.
 
-At this point it works in **Local mode**: accounts and the leaderboard exist only inside each player's own browser.
+## Existing account and progress protection
 
-## 2) Turn on REAL users + worldwide leaderboard (3 minutes, free)
+- Version 2.0.0 adds new state fields (`boostLvl` and `luckyLvl`) with zero defaults. Existing balance, total earned, taps, upgrades, streaks, tasks, account name and password hash are retained.
+- The update does not automatically delete or reset accounts or player progress.
+- Local account password hashes are upgraded after a successful login where possible. The original progress record is retained during the upgrade.
+- Players can export a JSON account-state backup from **Me → Account Security**. The backup does not include password hashes.
+- The separate Economy Reset action is available only when the signed-in username is `Jerron` in local mode. It creates a local backup before resetting local game progress. It keeps usernames and password credentials. It does not affect the Firebase database.
 
-GitHub Pages is static hosting, so a shared leaderboard needs a tiny free backend. This project uses Firebase Realtime Database through plain REST calls (no SDK, no build step).
+## Version 2.0.0 features
 
-1. Go to <https://console.firebase.google.com> → **Add project**.
-2. **Build → Realtime Database → Create database** (pick any region, start in *locked mode*).
-3. Open the **Rules** tab, paste the rules below, and **Publish**.
-4. Copy the database URL shown at the top of the **Data** tab (looks like `https://YOUR-PROJECT-default-rtdb.firebaseio.com`).
-5. Open `config.js`, paste it into `FIREBASE_URL`, commit. Done — every player now shares one leaderboard.
+- Stronger PBKDF2 password hashing for new/local accounts and a local login-attempt cooldown.
+- Change password after confirming the current password (local mode).
+- Jerron Owner title and owner panel.
+- Local-only player ban/unban with day, month or year duration and reason.
+- Local-only Cashy balance editing by username; total-earned leaderboard score is preserved.
+- Local-only economy reset with automatic backup; user accounts remain.
+- Cashy Multiplier and Lucky Aura shop upgrades.
+- Changelog tab, rank labels, owner badge, sound effects and visual-effect preferences.
+- Faster tap input and refreshed mobile UI.
 
-### Rules to paste
+## Important security limitations
 
-```json
-{
-  "rules": {
-    ".read": false,
-    ".write": false,
-    "board": {
-      ".read": true,
-      "$k": {
-        ".write": "newData.exists()",
-        ".validate": "newData.hasChildren(['n','s','c','t']) && newData.child('n').isString() && newData.child('n').val().length <= 14 && newData.child('n').val().toLowerCase() === $k && newData.child('s').isNumber() && newData.child('s').val() >= 0"
-      }
-    },
-    "users": {
-      "$k": {
-        ".read": true,
-        ".write": "!data.exists()",
-        "data": { ".write": "newData.exists()" }
-      }
-    }
-  }
-}
-```
+This project is a static browser app. The current Firebase REST configuration does **not** provide a verified owner identity, secure password recovery, or server-side moderation. A username such as `Jerron` is not proof of ownership: a public user can register that name unless the backend reserves it securely.
 
-## Features
+For that reason, owner ban/unban, Cashy editing and economy reset are enabled only for the `Jerron` account in **local mode**. They are deliberately locked in online mode. Do not remove this lock by adding a client-side secret or checking only the username; those approaches are not secure.
 
-- Local account (username + password) with login / register, session remembered
-- Earn Cashy by tapping, daily check-in streak, lucky box (every 2h), daily tap goal, 9 achievements
-- Shop: Tap Power and Auto Earner upgrades
-- Leaderboard refreshing every 2 seconds, ranked by total Cashy ever earned
-- King Tier for #1, NineTNine Tier #N for everyone else; dethrone notifications
-- Fullscreen button (iPhone Safari has no fullscreen API — use *Share → Add to Home Screen*)
-- Installable as a PWA, safe-area aware, works on phones, tablets and desktop
+Online account password reset requires a trusted recovery channel, such as Firebase Authentication with verified email, or a server-side recovery service. This update does not pretend that a password can be securely reset without one. Existing online credentials and progress are left unchanged.
 
-## Honest limitations
-
-- **No server-side validation.** Scores are computed in the player's browser, so a technical user could edit their own score. The rules above stop bad data shapes and account overwrites, but cannot stop forged scores. For a competitive public game, move scoring to a server (Cloud Functions / Supabase Edge Functions) later.
-- Passwords are salted + PBKDF2-hashed in the browser before being stored, but with no real auth backend, treat this as a casual game login, not a secure one. Tell players not to reuse real passwords.
-- The leaderboard downloads the whole `board` node every 2 seconds. That is fine for hundreds of players; beyond a few thousand, switch to a top-N query with an index.
+The existing online database rules shown in older project instructions are not a secure production authorization system. Before running a public competitive game, migrate authentication to Firebase Authentication and move admin actions and score validation into trusted Cloud Functions or another authenticated backend. Use database rules that authorize users by authenticated UID and reserve the owner UID server-side.
 
 ## Files
 

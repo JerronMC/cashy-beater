@@ -2,14 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
-<title>Cashy Beater</title>
-<meta name="description" content="Earn Cashy, climb the leaderboard, become King. By Dadasaves.">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Cashy Beater 2.0.0</title>
+<meta name="description" content="Cashy Beater 2.0.0 — earn Cashy, upgrade, and climb the leaderboard. Update by DataRonn.">
 <meta name="theme-color" content="#070b14">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Cashy Beater">
+<meta name="application-version" content="2.0.0">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -71,14 +72,15 @@
           <input id="fUser" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="14" placeholder="3–14 letters, numbers, _" required>
         </label>
         <label>Password
-          <input id="fPass" name="password" type="password" autocomplete="current-password" maxlength="40" placeholder="at least 4 characters" required>
+          <input id="fPass" name="password" type="password" autocomplete="current-password" maxlength="128" placeholder="8+ characters for new accounts" required>
         </label>
         <div id="authErr" class="err" role="alert"></div>
         <button id="authBtn" class="btn primary" type="submit">Login</button>
+        <button class="auth-link" type="button" data-act="forgot-password">Forgot password?</button>
       </form>
 
       <div id="modeNote" class="mode-note"></div>
-      <div class="by">by <b>Dadasaves</b></div>
+      <div class="by">Version 2.0.0 · update by <b>DataRonn</b></div>
     </div>
   </section>
 
@@ -115,7 +117,10 @@
       <!-- BOARD -->
       <section class="tab" id="tab-board"><div id="boardBox"></div></section>
 
-      <!-- ME -->
+      <!-- CHANGELOG -->
+      <section class="tab" id="tab-updates"><div id="updatesBox"></div></section>
+
+      <!-- ME + SETTINGS -->
       <section class="tab" id="tab-me"><div id="meBox"></div></section>
     </main>
 
@@ -124,6 +129,7 @@
       <button data-tab="tasks"><svg class="i"><use href="#i-tasks"/></svg><span>Tasks</span><i id="taskDot" class="dot hidden"></i></button>
       <button data-tab="shop"><svg class="i"><use href="#i-store"/></svg><span>Shop</span></button>
       <button data-tab="board"><svg class="i"><use href="#i-trophy"/></svg><span>Ranks</span></button>
+      <button data-tab="updates"><svg class="i"><use href="#i-clock"/></svg><span>Updates</span></button>
       <button data-tab="me"><svg class="i"><use href="#i-user"/></svg><span>Me</span></button>
     </nav>
   </section>
